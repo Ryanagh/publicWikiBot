@@ -156,17 +156,14 @@ class WikiBot:
             self.config_pass = config["config_pass"]
 
     def save_configs(self):
-        # Load the current config to not overwrite the entire file
         with open("config.json", "r") as f:
             config = json.load(f)
 
-        # Update only the relevant variables
         config["blacklist"] = self.blacklist
         config["whitelist"] = self.whitelist
         config["alttraderlist"] = self.alttraderlist
         config["shortcuts"] = self.shortcuts
 
-        # Write the updated config back to the file
         with open("config.json", "w") as f:
             json.dump(config, f, indent=4)
 
