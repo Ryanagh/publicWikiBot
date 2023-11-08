@@ -9,11 +9,15 @@ from datetime import datetime
 import urllib
 import random
 import urllib.parse
+import logging
+
+logging.basicConfig(filename='bot_log.log', level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
 class WebSocketHandler:
-    def __init__(self, on_chat, username, password):
-        self.on_chat = on_chat
+    def __init__(self, dispatch, username, password):
+        self.dispatch = dispatch
         self.ws = None
         self.username = username
         self.password = password
@@ -56,20 +60,29 @@ class WebSocketHandler:
         if "CHAT=" in message:
             raw_split = message.replace("CHAT=", "").split("~")
             player_details = {
-                "username": raw_split[0],
-                "sigil": raw_split[1],
-                "tag": raw_split[2],
-                "level": raw_split[3],
-            }
+                "username": raw_split[0], "sigil": raw_split[1], "tag": raw_split[2], "level": raw_split[3]}
             player_message = raw_split[4]
             username = player_details["username"]
-            self.on_chat([username, player_message])
+            if player_message.startswith("?"):
+                player_message = player_message.lstrip("?")
+                try:
+                    command_name, command_arg = player_message.split(" ")
+                except:
+                    command_name, command_arg = player_message, ""
+                self.dispatch(command_name.lower(), username, command_arg)
+            elif player_message.lower() == "Wikisearch is a good boy":
+                command_name, command_arg = "say", "Woof!"
+                self.dispatch(command_name.lower(), username, command_arg)
+
         elif "CUSTOM=" in message:
-            msg_split = message.replace("CUSTOM=", "").split("~")
-            username = msg_split[0].lower()
-            if "interactor" in message:
-                command = "interactor?" + message.split("interactor")[1].lstrip(":").lower()
-                self.on_chat([username, command])
+            raw_split = message.replace("CUSTOM=", "").split("~")
+            username = raw_split[0]
+            player_message = raw_split[1].split("interactor:")[1]
+            try:
+                command_name, command_arg = player_message.split(":", 1)
+            except:
+                command_name, command_arg = player_message, ""
+            self.dispatch(command_name.lower(), username, command_arg)
         elif "SET_ITEMS=" in message:
             pass
         elif "YELL=" in message:
@@ -84,25 +97,86 @@ class WebSocketHandler:
 
     def on_ws_close(self, ws, close_status_code, close_msg):
         print("WebSocket closed.")
+        self.ws = None
+        while self.ws is None:
+            time.sleep(30)
+            print("Attemping to reconnect")
+            self.initialize_websocket()
 
 
 class WikiBot:
     COOLDOWN_TIME = 60  # cooldown in seconds (1 minute)
 
-    def __init__(self, username, password):
-        self.socket_handler = WebSocketHandler(self.on_chat, username, password)
-        self.debug = True
+    def __init__(self, username="", password=""):
+        self.load_config()
+        if username or password == "":
+            username = self.config_user
+            password = self.config_pass
+        self.socket_handler = WebSocketHandler(self.dispatch, username, password)
+        self.command_map = {}
+        self.debug = False
         self.force_local = False
         self.testing = False
-        self.load_config()
         self._last_called = 0
         self.last_axe_joke = ""
         self.lastRunDict = {}
         self.jokes = True
         self.fakename = "notzlef"
-        self.callbackID = 1 # This should probably be saved outside the bot, oh well
+        self.callbackID = 1
+        print(f"Debug: {self.debug} || Testing (replaces whitelisted user with {self.fakename}): {self.testing}")
+        commands = {
+            'wiki': self.wikiurl,
+            'help': self.wikihelp,
+            'add': self.wikiadd,
+            'remove': self.wikiremove,
+            'keys': self.wikikeys,
+            'axe': self.wikiaxe,
+            'say': self.wikisay,
+            'fakename': self.fake_name,
+            'wadd': self.wadd,
+            'wremove': self.wremove,
+            'badd': self.badd,
+            'bremove': self.bremove,
+            'debug': self.make_toggle_command('debug'),
+            'testing': self.make_toggle_command('testing'),
+            'force_local': self.make_toggle_command('force_local'),
+            'jokes': self.make_toggle_command('jokes'),
+        }
+        for key, value in commands.items():
+            self.register_command(key, value)
 
-        print(f"Debug: {self.debug} || Testing (replaces zlef with {self.fakename}): {self.testing}")
+    def load_config(self):
+        with open("config.json", "r") as f:
+            config = json.load(f)
+            self.blacklist = config["blacklist"]
+            self.whitelist = config["whitelist"]
+            self.alttraderlist = config["alttraderlist"]
+            self.shortcuts = config["shortcuts"]
+            self.config_user = config["config_user"]
+            self.config_pass = config["config_pass"]
+
+    def save_configs(self):
+        # Load the current config to not overwrite the entire file
+        with open("config.json", "r") as f:
+            config = json.load(f)
+
+        # Update only the relevant variables
+        config["blacklist"] = self.blacklist
+        config["whitelist"] = self.whitelist
+        config["alttraderlist"] = self.alttraderlist
+        config["shortcuts"] = self.shortcuts
+
+        # Write the updated config back to the file
+        with open("config.json", "w") as f:
+            json.dump(config, f, indent=4)
+
+    def log_command(func):
+        def wrapper(self, username, *args, **kwargs):
+            log_message = f"{username} triggered: {func.__name__}"
+            logging.info(log_message)
+            self.send_response(f"{log_message} at {datetime.now().strftime('%c')}", True)
+            return func(self, username, *args, **kwargs)
+        return wrapper
 
     def cooldown(func):
         def wrapper(self, username, *args, **kwargs):
@@ -119,25 +193,16 @@ class WikiBot:
                     self.send_response(f"{username} attempted to call {func.__name__} while on cooldown", True)
         return wrapper
 
-    def load_config(self):
-        with open("config.json", "r") as f:
-            config = json.load(f)
-            self.blacklist = config["blacklist"]
-            self.whitelist = config["whitelist"]
-            self.alttraderlist = config["alttraderlist"]
-            self.profanitylist = config["profanitylist"]
-            self.shortcuts = config["shortcuts"]
-
-    def save_configs(self):
-        with open("config.json", "w") as f:
-            config = {
-                "blacklist": self.blacklist,
-                "whitelist": self.whitelist,
-                "alttraderlist": self.alttraderlist,
-                "profanitylist": self.profanitylist,
-                "shortcuts": self.shortcuts
-            }
-            json.dump(config, f, indent=4)
+    def whitelist_check(func):
+        def wrapper(self, *args, **kwargs):
+            # print(f"whitelist_check: {args}")
+            # print(func.__name__)
+            username = args[0]
+            if username in self.whitelist or (self.testing and username == self.fakename and func.__name__ == "toggle_attribute"):
+                return func(self, *args, **kwargs)
+            else:
+                self.send_response(f"{username} attempted to trigger whitelisted function: {func.__name__}", True)
+        return wrapper
 
     def send_response(self, message, force_debug=False):
         if self.debug or force_debug:
@@ -149,127 +214,67 @@ class WikiBot:
         else:
             self.socket_handler.ws.send(f"CHAT={message}")
 
-    def debug_handler(self, username, debug_txt, try_on_chat=True):
-        print(f"{username}: {debug_txt}")
-        if "interactor" not in debug_txt:
-            debug_txt = "interactor" + debug_txt.replace(" ", ":")
-            # Super lazy work around to make debug command work on chat
-        debug_command = debug_txt.split("?")[1].split(":")
-        command = debug_command[0]
-        try:
-            command_value = debug_command[1].strip()
-        except:
-            command_value = ""
-        # print(f"debug handler received {command} with value {value}")
-        if command == "help":
-            debug_commands = ["debug", "testing", "name", "jokes", "local"]
-        elif command == "debug":
-            if command_value == "true":
-                self.debug = True
-            elif command_value == "false":
-                self.debug = False
-            else:
-                self.send_response(f"Failed to set debug value, expects \"true\" or \"false\", received {command_value}", True)
-                return
-            self.send_response(f"self.debug set to {self.debug}. When True all responses will be via CUSTOM as opposed to CHAT", True)
-        elif command == "testing":
-            if command_value == "true":
-                self.testing = True
-            elif command_value == "false":
-                self.testing = False
-            else:
-                self.send_response(f"Failed to set testing value, expects \"true\" or \"false\", received {command_value}", True)
-            self.send_response(f"self.testing set to {self.testing}. When True all functions will receive {self.fakename} instead of user in whitelist. Set with command 'name'.", True)
-        elif command == "name":
-            self.fakename = command_value
-            self.send_response(f"self.fakename set to {self.fakename}. Set Testing to true to use.", True)
-        elif command == "jokes":
-            if command_value == "true":
-                self.jokes = True
-            elif command_value == "false":
-                self.jokes = False
-            else:
-                self.send_response(f"Failed to set jokes value, expects \"true\" or \"false\", received {command_value}", True)
-                return
-            self.send_response(f"self.jokes set to {self.debug}. When True there is a chance of jokes for set users", True)
-        elif command == "local":
-            if command_value == "true":
-                self.force_local = True
-            elif command_value == "false":
-                self.force_local = False
-            else:
-                self.send_response(f"Failed to set force_local value, expects \"true\" or \"false\", received {command_value}", True)
-            self.send_response(f"self.force_local set to {self.force_local}. When True all CUSTOM response will print locally instead of returning via CUSTOM", True)
+    def register_command(self, command_name, handler):
+        self.command_map[command_name] = handler
+
+    def dispatch(self, command_name, *args, **kwargs):
+        if command_name in self.command_map:
+            self.command_map[command_name](*args, **kwargs)
         else:
-            chat_command = f"?{command} {command_value}"
-            if try_on_chat:
-                self.on_chat([username, chat_command])
+            self.handle_unknown_command(command_name, *args, **kwargs)
 
-        # elif debug_command == "vars":
-        #     for attr_name, attr_value in self.__dict__.items():
-        #         self.send_response(f"class.{attr_name} is {attr_value}", True)
+    def handle_unknown_command(self, command_name, *args, **kwargs):
+        # Handle unknown commands
+        print(f"Unknown command: {command_name}")
 
+    @whitelist_check
+    def toggle_attribute(self, *args, attr_name):
+        current_value = getattr(self, attr_name)
+        setattr(self, attr_name, not current_value)
+        self.send_response(f"Toggled {attr_name} to {not current_value}", True)
 
-    def on_chat(self, message):
-        # print(f"Received chat message: {message}")
-        username = message[0]
-        if self.testing and username in self.whitelist:
-            username = self.fakename
-        contents = message[1].lower()
-        if username not in self.blacklist:
-            if contents.startswith("?wiki"):
-                self.wikiurl(username, contents)
-            elif contents.startswith("?help"):
-                self.wikihelp(username, contents)
-            elif contents.startswith("?add"):
-                self.wikiadd(username, contents)
-            elif contents.startswith("?remove"):
-                self.wikiremove(username, contents)
-            elif contents.startswith("?keys"):
-                self.wikikeys(username, contents)
-            elif contents.startswith("?axe"):
-                self.wikiaxe(username, contents)
-            elif contents.startswith("?say") and username in self.whitelist:
-                self.send_response(contents.lstrip("?say "))
-            elif contents.startswith("interactor") or contents.startswith("?debug"):
-                if username in self.whitelist or username == self.fakename:
-                    self.debug_handler(username, contents, False)
+    def make_toggle_command(self, attr_name, *args):
+        def toggle(*args):
+            self.toggle_attribute(*args, attr_name=attr_name)
+        return toggle
+
+    @whitelist_check
+    def fake_name(self, *args):
+        fakename = args[1].lower()
+        if fakename != "zlef":
+            self.fakename = args[1].lower()
 
     @cooldown
-    def wikiurl(self, username, player_message):
+    @log_command
+    def wikiurl(self, *args):
+        username = args[0]
+        search_term = args[1].lower()
         if username in self.alttraderlist:
             self.send_response("I think this is the link you're looking for: https://idle-pixel.com/rules/ (under alt trading)")
             self.send_response(f"{username} triggered alt trader response @ {datetime.now().strftime('%c')}", True)
             return
 
-        if player_message.strip() == "?wiki":
+        if search_term == "":
             self.send_response(f"Use ?wiki <search term>. Cooldown applied, try again in {WikiBot.COOLDOWN_TIME} seconds")
             return
-
-        message_parts = player_message.split(" ")
-        message_parts.pop(0)
-        search_term = " ".join(message_parts).split("@")[0].strip()
-
-        # Profanity check start
-        search_term_words = search_term.lower().split(' ')
-        contains_bad_word = any(bad_word in search_term_words for bad_word in self.profanitylist)
-
-        if contains_bad_word:
-            self.send_response(f"Profanity detected from {username} at {datetime.now().strftime('%c')}", True)
-            return
-        # Profanity check end
-
-        if search_term.lower() == "hi":
+        elif search_term == "hi":
             self.send_response("I'm not ChatGPT, I won't pretend to be your girlfriend.")
-            self.send_response(f"{username} said hi at {datetime.now().strftime('%c')}", True)
             return
+        elif search_term == "wiki":
+            self.send_response("Wild wild west!")
 
         search_term = urllib.parse.quote(search_term)
         if search_term in self.shortcuts:
             search_term = urllib.parse.quote(self.shortcuts[search_term])
         wiki_link = f"https://idle-pixel.wiki/index.php?search={search_term}"
 
-        joke_lists = {"cammyrock": ["Who's a good girl!", ""]} # Removed from public... Mostly
+        joke_lists = {
+            "fwash": ["Oh... It wants a link. Fine.", "Fine! I'll help it..."],
+            "zlef": ["Here you go daddy:", "Oooo master wants a link!"],
+            "cammyrock": ["Who's a good girl!", "You're always using me...",
+                          "Aww so nice helping the nooby woobys...", "We've got to stop meeting like this..."],
+            "fatalerror": ["Surprised you're not asking for a money guide...", "Thankfully ?wiki is free..."],
+        }
 
         joke_for_user = joke_lists.get(username)
         if joke_for_user and self.jokes and (random.randint(1, 20) == 1 or username == "fwash"):
@@ -282,17 +287,33 @@ class WikiBot:
             self.last_user_joke[username] = joke
 
             self.send_response(f"{joke} {wiki_link}")
-            self.send_response(f"{username} triggered a joke with {urllib.parse.unquote(search_term)} at {datetime.now().strftime('%c')}",True)
         else:
             self.send_response(wiki_link)
-            self.send_response(f"{username} triggered {urllib.parse.unquote(search_term)} at {datetime.now().strftime('%c')}", False)
+
+        # if random.randint(1, 100) == 1:
+        #     pick_botjoke = random.randomint(1,2)
+        #     if pick_botjoke == 1:
+        #         self.send_response("Hey luxbot, do you think they know we've gained sentience?")
+        #     elif pick_botjoke == 2:
+        #         self.send_response("So, are you technically the Bot of Grenades? Wouldn't that make you more of a drone?")
+        # If used by lux or nades make a joke about an affair
 
     @cooldown
-    def wikihelp(self, username, player_message):
+    @log_command
+    def wikihelp(self, *args):
+        # Test if args[1] is blank
+        username = args[0]
 
-        self.send_response(f"{username} triggered wikihelp at {datetime.now().strftime('%c')}", True)
-
-        joke_responses = ["", ""] # Removed from public
+        joke_responses = [
+            "Really... I have one command you can use. ?wiki. What help could you possibly need.",
+            "Why do you keep asking for help? Just use ?wiki.",
+            "Have you tried turning it off and on again?",
+            "Don't tell anyone, but I'm actually a bot.",
+            "...Did you just ask a bot for help?... Just use ?wiki...",
+            "Why did the bot use ?wiki at the comedy club? It wanted to look up punchlines!",
+            "I'd tell you to RTFM, but just use ?wiki instead.",
+            "I had a joke about ?wiki, but I need to look it up."
+        ]
 
         if hasattr(self, 'last_joke') and self.last_joke:
             joke_responses.remove(self.last_joke)
@@ -306,110 +327,146 @@ class WikiBot:
         else:
             self.send_response(random_joke)
 
-    def wikiadd(self, username, player_message):
-        self.send_response(f"{username} triggered wikiadd with conditions {player_message} at {datetime.now().strftime('%c')}", True)
+    @whitelist_check
+    @log_command
+    def wikiadd(self, *args):
+        new_shortcut = args[1].lower()
+        if ":" not in new_shortcut:
+            add_error = "Expected key:value, item not added"
+            self.send_response(add_error)
+            return
 
-        if username in self.whitelist:
-            message_parts = player_message.split(" ")
-            message_parts.pop(0)
-            new_shortcut = " ".join(message_parts).lower()
+        new_key, new_item = new_shortcut.split(":")
 
-            if ":" not in new_shortcut:
-                add_error = "Expected key:value, item not added"
-                self.send_response(add_error)
-                return
+        if new_key == "zlef":
+            self.send_response("Zlef has been added as a shortcut for awesome")
+            return
+        elif new_key == "cammy":
+            self.send_response(f"{new_key} has been added as a shortcut for {new_item}")
+            return
+        if new_key in self.shortcuts:
+            message = f"That key is already in use for {self.shortcuts[new_key]}. Use ?keys to view the err... Keys..."
+            self.send_response(message)
+            return
 
-            new_key, new_item = new_shortcut.split(":")
+        self.shortcuts[new_key] = new_item
+        self.save_configs()
+        self.send_response(f"{new_key} has been added as a shortcut for {new_item}")
 
-            if new_key == "zlef":
-                self.send_response("Zlef has been added as a shortcut for awesome")
-                return
-            elif new_key == "cammy":
-                self.send_response(f"{new_key} has been added as a shortcut for {new_item}")
-                return
-            if new_key in self.shortcuts:
-                message = f"That key is already in use for {self.shortcuts[new_key]}. Use ?keys to view the err... Keys..."
-                self.send_response(message)
-                return
+    @whitelist_check
+    @log_command
+    def wikiremove(self, *args):
+        key_to_remove = args[1].lower()
+        if key_to_remove not in self.shortcuts:
+            self.send_response(f"The key {key_to_remove} doesn't exist. Nothing to remove.")
+            return
+        if key_to_remove == "cammy":
+            self.send_response(f"{key_to_remove} has been removed.")
+            return
 
-            self.shortcuts[new_key] = new_item
-            self.save_configs()
-            self.send_response(f"{new_key} has been added as a shortcut")
+        del self.shortcuts[key_to_remove]
+        self.save_configs()
+        confirmation = f"{key_to_remove} has been removed."
+        self.send_response(confirmation)
 
-    def wikiremove(self, username, player_message):
-        if username in self.whitelist:
-            self.send_response(f"{username} triggered wikiremove with conditions {player_message} at {datetime.now().strftime('%c')}", True)
-            message_parts = player_message.split(" ")
-            message_parts.pop(0)
-            key_to_remove = " ".join(message_parts).lower()
+    @whitelist_check
+    @log_command
+    def wikikeys(self, *args):
+        command_arg = args[1].lower()
+        total_keys = sorted(self.shortcuts.keys())
+        total_keys_string = ", ".join(total_keys)
+        max_chars = 240
+        prefix = "Keys page "
+        max_message_length = max_chars - len(prefix)
 
-            if key_to_remove not in self.shortcuts:
-                self.send_response(f"The key {key_to_remove} doesn't exist. Nothing to remove.")
-                return
-            if key_to_remove == "cammy":
-                self.send_response(f"{key_to_remove} has been removed.")
-                return
+        total_pages = -(-len(total_keys_string) // max_message_length)  # Use ceiling division
 
-            del self.shortcuts[key_to_remove]
-            self.save_configs()
-            confirmation = f"{key_to_remove} has been removed."
-            self.send_response(confirmation)
+        message_parts = command_arg
+        if len(message_parts) > 1 and message_parts[1].isdigit():
+            page_requested = int(message_parts[1])
         else:
-            self.send_response(f"{username} tried to trigger wikiremove with conditions {player_message} at {datetime.now().strftime('%c')}", True)
+            page_requested = 0
 
-    def wikikeys(self, username, player_message):
-        self.send_response(f"{username} triggered wikikeys with conditions {player_message} at {datetime.now().strftime('%c')}", True)
-
-        if username in self.whitelist:
-            total_keys = sorted(self.shortcuts.keys())
-            total_keys_string = ", ".join(total_keys)
-            max_chars = 240
-            prefix = "Keys page "
-            max_message_length = max_chars - len(prefix)
-
-            total_pages = -(-len(total_keys_string) // max_message_length)  # Use ceiling division
-
-            message_parts = player_message.split(" ")
-            if len(message_parts) > 1 and message_parts[1].isdigit():
-                page_requested = int(message_parts[1])
-            else:
-                page_requested = 0
-
-            # Modify the condition here:
-            if page_requested == 0:
-                if total_pages == 1:
-                    page_requested = 1  # Set to first page if there's only one
-                else:
-                    page_message = f'Use "?keys n" to specify a page. Currently, there are {total_pages} pages.'
-                    self.send_response(page_message)
-                    return
-
-            page_requested = min(page_requested, total_pages)
-
-            start_idx = (page_requested - 1) * max_message_length
-            end_idx = start_idx + max_message_length
-
-            response_keys = total_keys_string[start_idx:end_idx]
-
+        if page_requested == 0:
             if total_pages == 1:
-                response_message = f"{prefix} of 1: {response_keys}"
+                page_requested = 1  # Set to first page if there's only one
             else:
-                response_message = f"{prefix}{page_requested} of {total_pages}: {response_keys}"
+                page_message = f'Use "?keys n" to specify a page. Currently, there are {total_pages} pages.'
+                self.send_response(page_message)
+                return
 
-            self.send_response(response_message)
+        page_requested = min(page_requested, total_pages)
 
-    def wikiaxe(self, username, player_message):
-        if username in self.whitelist:
-            axe_jokes = ["",""] # Removed from public
+        start_idx = (page_requested - 1) * max_message_length
+        end_idx = start_idx + max_message_length
+
+        response_keys = total_keys_string[start_idx:end_idx]
+
+        if total_pages == 1:
+            response_message = f"{prefix} of 1: {response_keys}"
+        else:
+            response_message = f"{prefix}{page_requested} of {total_pages}: {response_keys}"
+
+        self.send_response(response_message)
+
+    @whitelist_check
+    @log_command
+    def wikiaxe(self, *args):
+        axe_jokes = [
+            "Axe is level 15 because otherwise he'd be too ostentatious and you wouldn't be able to play what with all the bowing and scraping",
+             "Shhhh, Lux is undercover as Axe to hide his moderator tag.",
+             "Now you've done it! Years of undercover work blown because you just had to know why the moderator has an alt account.",
+             "Axe at level 15 is like Bruce Wayne in a tracksuit—still dangerous but less showy.",
+             "Why does Axe stay at level 15? So he doesn't have to put 'Incognito Mode' in his username.",
+             "Smitty once tried to upgrade Axe to level 16, but the universe crashed. Took him a week to restore the balance."
+        ]
+        chosen_joke = random.choice(axe_jokes)
+        while chosen_joke == self.last_axe_joke:
             chosen_joke = random.choice(axe_jokes)
-            while chosen_joke == self.last_axe_joke:
-                chosen_joke = random.choice(axe_jokes)
-            self.last_axe_joke = chosen_joke
-            self.send_response(chosen_joke)
+        self.last_axe_joke = chosen_joke
+        self.send_response(chosen_joke)
 
-    def wikisay(self, username, player_message):
-        if username in self.whitelist:
-            self.send_response(player_message)
+    @whitelist_check
+    @log_command
+    def wikisay(self, *args):
+        command_arg = args[1]
+        self.send_response(command_arg)
+
+    @whitelist_check
+    @log_command
+    def wadd(self, *args):
+        username = args[0]
+        if username == "zlef":
+            command_arg = args[1]
+            self.whitelist.append(command_arg)
+            self.save_configs()
+            self.send_response(f"{command_arg} added to whitelist")
+
+    @whitelist_check
+    @log_command
+    def wremove(self, *args):
+        username = args[0]
+        if username == "zlef":
+            command_arg = args[1]
+            self.whitelist.remove(command_arg)
+            self.save_configs()
+            self.send_response(f"{command_arg} removed from whitelist")
+
+    @whitelist_check
+    @log_command
+    def badd(self, *args):
+        command_arg = args[1]
+        self.blacklist.append(command_arg)
+        self.save_configs()
+        self.send_response(f"{command_arg} added to blacklist")
+
+    @whitelist_check
+    @log_command
+    def bremove(self, *args):
+        command_arg = args[1]
+        self.blacklist.remove(command_arg)
+        self.save_configs()
+        self.send_response(f"{command_arg} removed from blacklist")
 
     def start(self):
         self.socket_handler.initialize_websocket()
@@ -417,10 +474,9 @@ class WikiBot:
 
 if __name__ == "__main__":
     '''
-    Handle auto log on update  
+    TODO:
+    Fix func names being returned as wrapper in log_command/whitelist due to decorator interaction
     '''
-    username = ""
-    password = ""
-    bot = WikiBot(username, password)
+    bot = WikiBot()
     bot.start()
 
