@@ -10,6 +10,7 @@ import urllib
 import random
 import urllib.parse
 import logging
+from functools import wraps
 
 logging.basicConfig(filename='bot_log.log', level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -58,31 +59,9 @@ class WebSocketHandler:
 
     def on_ws_message(self, ws, message: str):
         if "CHAT=" in message:
-            raw_split = message.replace("CHAT=", "").split("~")
-            player_details = {
-                "username": raw_split[0], "sigil": raw_split[1], "tag": raw_split[2], "level": raw_split[3]}
-            player_message = raw_split[4]
-            username = player_details["username"]
-            if player_message.startswith("?"):
-                player_message = player_message.lstrip("?")
-                try:
-                    command_name, command_arg = player_message.split(" ")
-                except:
-                    command_name, command_arg = player_message, ""
-                self.dispatch(command_name.lower(), username, command_arg)
-            elif player_message.lower() == "Wikisearch is a good boy":
-                command_name, command_arg = "say", "Woof!"
-                self.dispatch(command_name.lower(), username, command_arg)
-
+            self.on_chat(message)
         elif "CUSTOM=" in message:
-            raw_split = message.replace("CUSTOM=", "").split("~")
-            username = raw_split[0]
-            player_message = raw_split[1].split("interactor:")[1]
-            try:
-                command_name, command_arg = player_message.split(":", 1)
-            except:
-                command_name, command_arg = player_message, ""
-            self.dispatch(command_name.lower(), username, command_arg)
+            self.on_custom(message)
         elif "SET_ITEMS=" in message:
             pass
         elif "YELL=" in message:
@@ -91,6 +70,35 @@ class WebSocketHandler:
             pass
         else:
             print(message)
+
+    def on_chat(self, message):
+        raw_split = message.replace("CHAT=", "").split("~")
+        player_details = {
+            "username": raw_split[0], "sigil": raw_split[1], "tag": raw_split[2], "level": raw_split[3]}
+        player_message = raw_split[4]
+        username = player_details["username"]
+        if player_message.startswith("?"):
+            player_message = player_message.lstrip("?")
+            try:
+                command_name, command_arg = player_message.split(" ", 1)
+            except:
+                command_name, command_arg = player_message, ""
+            self.dispatch(command_name.lower(), username, command_arg)
+        elif "wikisearch is a good boy" in player_message.lower():
+            self.dispatch("woof", username)
+        # elif player_message.lower().startswith("!zombo"):
+        #     self.dispatch("zombo", username, player_message)
+
+    def on_custom(self, message):
+        print(f"CUSTOM: {message}")
+        raw_split = message.replace("CUSTOM=", "").split("~")
+        username = raw_split[0]
+        player_message = raw_split[1].split("interactor:")[1]
+        try:
+            command_name, command_arg = player_message.split(":", 1)
+        except:
+            command_name, command_arg = player_message, ""
+        self.dispatch(command_name.lower(), username, command_arg)
 
     def on_ws_error(self, ws, error):
         print(f"WebSocket error: {error}")
@@ -109,7 +117,7 @@ class WikiBot:
 
     def __init__(self, username="", password=""):
         self.load_config()
-        if username or password == "":
+        if username == "" or password == "":
             username = self.config_user
             password = self.config_pass
         self.socket_handler = WebSocketHandler(self.dispatch, username, password)
@@ -122,6 +130,8 @@ class WikiBot:
         self.lastRunDict = {}
         self.jokes = True
         self.fakename = "notzlef"
+        self.nades = False
+
         self.callbackID = 1
         print(f"Debug: {self.debug} || Testing (replaces whitelisted user with {self.fakename}): {self.testing}")
         commands = {
@@ -132,11 +142,14 @@ class WikiBot:
             'keys': self.wikikeys,
             'axe': self.wikiaxe,
             'say': self.wikisay,
+            'custom': self.wikicustom,
             'fakename': self.fake_name,
             'wadd': self.wadd,
             'wremove': self.wremove,
             'badd': self.badd,
             'bremove': self.bremove,
+            'woof': self.wikiwoof,
+            'zombo': self.wikizombo,
             'debug': self.make_toggle_command('debug'),
             'testing': self.make_toggle_command('testing'),
             'force_local': self.make_toggle_command('force_local'),
@@ -168,43 +181,60 @@ class WikiBot:
             json.dump(config, f, indent=4)
 
     def log_command(func):
+        @wraps(func)
         def wrapper(self, username, *args, **kwargs):
-            log_message = f"{username} triggered: {func.__name__}"
+            log_message = f"{username} triggered: {func.__name__}, with args: {args}"
             logging.info(log_message)
             self.send_response(f"{log_message} at {datetime.now().strftime('%c')}", True)
             return func(self, username, *args, **kwargs)
         return wrapper
 
     def cooldown(func):
-        def wrapper(self, username, *args, **kwargs):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
             current_time = time.time()
+            if self.testing and not (func.__name__ == "toggle_attribute" or func.__name__ == "fake_name"):
+                args_list = list(args)
+                args_list[0] = self.fakename
+                args = tuple(args_list)
+            username = args[0]
             if username in self.blacklist or "austin" in username:
                 self.send_response(f"Blacklisted user {username} attempted to trigger a command", True)
             else:
                 if username in self.whitelist:
-                    return func(self, username, *args, **kwargs)
+                    return func(self, *args, **kwargs)
                 if self.lastRunDict.get(func.__name__, 0) + WikiBot.COOLDOWN_TIME <= current_time:
                     self.lastRunDict[func.__name__] = current_time
-                    return func(self, username, *args, **kwargs)
+                    return func(self, *args, **kwargs)
                 else:
                     self.send_response(f"{username} attempted to call {func.__name__} while on cooldown", True)
         return wrapper
 
     def whitelist_check(func):
+        @wraps(func)
         def wrapper(self, *args, **kwargs):
-            # print(f"whitelist_check: {args}")
-            # print(func.__name__)
+            print("In whitelist check")
+            print(f"Called function: {func.__name__}")
+            if self.testing and not (func.__name__ == "toggle_attribute" or func.__name__ == "fake_name"):
+                args_list = list(args)
+                args_list[0] = self.fakename
+                args = tuple(args_list)
+                print(f"Changed name to {self.fakename}")
+            else:
+                print("Conditions not met for self.testing")
             username = args[0]
-            if username in self.whitelist or (self.testing and username == self.fakename and func.__name__ == "toggle_attribute"):
+            if username in self.whitelist:
+                print("User found in whitelist")
                 return func(self, *args, **kwargs)
             else:
                 self.send_response(f"{username} attempted to trigger whitelisted function: {func.__name__}", True)
+
         return wrapper
 
     def send_response(self, message, force_debug=False):
         if self.debug or force_debug:
             if not self.force_local:
-                self.socket_handler.ws.send(f"CUSTOM=zlef~WIKI{self.callbackID}:wikibot:{message}")
+                self.socket_handler.ws.send(f"CUSTOM=zlef~IPP{self.callbackID}:wikibot:{message}")
                 self.callbackID += 1
             else:
                 print(message)
@@ -237,6 +267,9 @@ class WikiBot:
 
     @whitelist_check
     def fake_name(self, *args):
+        """
+        Assigns a fake name to the current object unless it's 'zlef'.
+        """
         fakename = args[1].lower()
         if fakename != "zlef":
             self.fakename = args[1].lower()
@@ -244,6 +277,9 @@ class WikiBot:
     @cooldown
     @log_command
     def wikiurl(self, *args):
+        """
+        Generates and sends a wiki URL based on a search term. Includes special responses for certain users and terms.
+        """
         username = args[0]
         search_term = args[1].lower()
         if username in self.alttraderlist:
@@ -260,13 +296,17 @@ class WikiBot:
         elif search_term == "wiki":
             self.send_response("Wild wild west!")
 
+        if "@" in search_term:
+            search_term = search_term.split("@")[0].strip()
         search_term = urllib.parse.quote(search_term)
         if search_term in self.shortcuts:
             search_term = urllib.parse.quote(self.shortcuts[search_term])
+
         wiki_link = f"https://idle-pixel.wiki/index.php?search={search_term}"
 
         joke_lists = {
             "fwash": ["Oh... It wants a link. Fine.", "Fine! I'll help it..."],
+            "i am smitty": ["It's your game, why do you need me?", "Ave Imperator", "Sic Semper Tyrannis", "Ecce homo"],
             "zlef": ["Here you go daddy:", "Oooo master wants a link!"],
             "cammyrock": ["Who's a good girl!", "You're always using me...",
                           "Aww so nice helping the nooby woobys...", "We've got to stop meeting like this..."],
@@ -274,7 +314,7 @@ class WikiBot:
         }
 
         joke_for_user = joke_lists.get(username)
-        if joke_for_user and self.jokes and (random.randint(1, 20) == 1 or username == "fwash"):
+        if joke_for_user and self.jokes and (random.randint(1, 20) == 1 or username == "fwash" or username == "i am smitty"):
             if hasattr(self, 'last_user_joke') and self.last_user_joke.get(username):
                 joke_for_user = [j for j in joke_for_user if j != self.last_user_joke[username]]
 
@@ -298,7 +338,9 @@ class WikiBot:
     @cooldown
     @log_command
     def wikihelp(self, *args):
-        # Test if args[1] is blank
+        """
+        Provides a humorous help response or a list of available commands to whitelisted users.
+        """
         username = args[0]
 
         joke_responses = [
@@ -327,6 +369,9 @@ class WikiBot:
     @whitelist_check
     @log_command
     def wikiadd(self, *args):
+        """
+        Adds a new shortcut for the wiki command. Requires a key:value format.
+        """
         new_shortcut = args[1].lower()
         if ":" not in new_shortcut:
             add_error = "Expected key:value, item not added"
@@ -341,6 +386,7 @@ class WikiBot:
         elif new_key == "cammy":
             self.send_response(f"{new_key} has been added as a shortcut for {new_item}")
             return
+
         if new_key in self.shortcuts:
             message = f"That key is already in use for {self.shortcuts[new_key]}. Use ?keys to view the err... Keys..."
             self.send_response(message)
@@ -353,6 +399,9 @@ class WikiBot:
     @whitelist_check
     @log_command
     def wikiremove(self, *args):
+        """
+        Removes an existing shortcut from the wiki command list.
+        """
         key_to_remove = args[1].lower()
         if key_to_remove not in self.shortcuts:
             self.send_response(f"The key {key_to_remove} doesn't exist. Nothing to remove.")
@@ -369,6 +418,9 @@ class WikiBot:
     @whitelist_check
     @log_command
     def wikikeys(self, *args):
+        """
+        Lists all current shortcut keys for the wiki command, with support for pagination.
+        """
         command_arg = args[1].lower()
         total_keys = sorted(self.shortcuts.keys())
         total_keys_string = ", ".join(total_keys)
@@ -409,6 +461,9 @@ class WikiBot:
     @whitelist_check
     @log_command
     def wikiaxe(self, *args):
+        """
+        Sends a random joke related to the 'Axe' character, avoiding repetition.
+        """
         axe_jokes = [
             "Axe is level 15 because otherwise he'd be too ostentatious and you wouldn't be able to play what with all the bowing and scraping",
              "Shhhh, Lux is undercover as Axe to hide his moderator tag.",
@@ -426,12 +481,48 @@ class WikiBot:
     @whitelist_check
     @log_command
     def wikisay(self, *args):
+        """
+        Echoes back the given argument.
+        """
         command_arg = args[1]
+        print(command_arg)
         self.send_response(command_arg)
+
+    @cooldown
+    @log_command
+    def wikizombo(self, *args):
+        """
+        Echoes back the given argument.
+        """
+        username = args[0]
+        command_args = args[1]
+        print(f"username: {username}, args: {command_args}")
+        if username == "godofnades" and "stop" in command_args:
+            self.nades = True
+            self.send_response("Command disabled! Note this will reset on next launch if not removed")
+        if not self.nades:
+            self.send_response("BotofNades is experiencing an oopsy. The -Green Zombie- is in Forest. To disable this GodofNades, send '!zombo stop' and remind me to take this out")
+        print(self.nades)
+
+
+    @whitelist_check
+    @log_command
+    def wikicustom(self, *args):
+        """
+        Echoes back the given argument.
+        """
+        command_arg = args[1]
+        # self.send_response(command_arg)
+
+        # self.socket_handler.ws.send(f"CUSTOM={args[1]}")
+        self.socket_handler.ws.send("CUSTOM=botofnades~altTrader:info:ping")
 
     @whitelist_check
     @log_command
     def wadd(self, *args):
+        """
+        Adds a user to the whitelist, exclusive to 'zlef'.
+        """
         username = args[0]
         if username == "zlef":
             command_arg = args[1]
@@ -442,6 +533,9 @@ class WikiBot:
     @whitelist_check
     @log_command
     def wremove(self, *args):
+        """
+        Removes a user from the whitelist, exclusive to 'zlef'.
+        """
         username = args[0]
         if username == "zlef":
             command_arg = args[1]
@@ -452,6 +546,9 @@ class WikiBot:
     @whitelist_check
     @log_command
     def badd(self, *args):
+        """
+        Adds a user to the blacklist.
+        """
         command_arg = args[1]
         self.blacklist.append(command_arg)
         self.save_configs()
@@ -460,10 +557,21 @@ class WikiBot:
     @whitelist_check
     @log_command
     def bremove(self, *args):
+        """
+        Removes a user from the blacklist.
+        """
         command_arg = args[1]
         self.blacklist.remove(command_arg)
         self.save_configs()
         self.send_response(f"{command_arg} removed from blacklist")
+
+    @whitelist_check
+    @log_command
+    def wikiwoof(self, *args):
+        """
+        Responds to "wikisearch is a good boy" with "Woof!"
+        """
+        self.send_response("Woof!")
 
     def start(self):
         self.socket_handler.initialize_websocket()
@@ -472,8 +580,8 @@ class WikiBot:
 if __name__ == "__main__":
     '''
     TODO:
-    Fix func names being returned as wrapper in log_command/whitelist due to decorator interaction
     '''
+    # bot = WikiBot("testzlef", "zleftest92")
     bot = WikiBot()
     bot.start()
 
